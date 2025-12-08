@@ -19,7 +19,6 @@ from contextlib import asynccontextmanager
 from http import HTTPStatus
 from typing import Annotated, Any, Literal
 
-import model_hosting_container_standards.sagemaker as sagemaker_standards
 import pydantic
 import uvloop
 from fastapi import APIRouter, Depends, FastAPI, Form, HTTPException, Query, Request
@@ -969,9 +968,10 @@ def build_app(args: Namespace) -> FastAPI:
 
     register_vllm_serve_api_routers(app)
 
-    from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
+    if not args.disable_sagemaker_standards:
+        from vllm.entrypoints.sagemaker.routes import register_sagemaker_routes
 
-    register_sagemaker_routes(router)
+        register_sagemaker_routes(router)
     app.include_router(router)
 
     app.root_path = args.root_path
@@ -1065,7 +1065,10 @@ def build_app(args: Namespace) -> FastAPI:
                 f"Invalid middleware {middleware}. Must be a function or a class."
             )
 
-    app = sagemaker_standards.bootstrap(app)
+    if not args.disable_sagemaker_standards:
+        import model_hosting_container_standards.sagemaker as sagemaker_standards
+
+        app = sagemaker_standards.bootstrap(app)
 
     return app
 
