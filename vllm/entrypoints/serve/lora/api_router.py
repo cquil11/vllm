@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response
@@ -16,35 +15,34 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 
-if TYPE_CHECKING:
+try:
     import model_hosting_container_standards.sagemaker as sagemaker_standards
+    _SAGEMAKER_AVAILABLE = True
+except ImportError:
+    _SAGEMAKER_AVAILABLE = False
 
 logger = init_logger(__name__)
 router = APIRouter()
-
-
-def _get_sagemaker_standards():
-    """Lazily import sagemaker_standards, returns None if not available."""
-    try:
-        import model_hosting_container_standards.sagemaker as sagemaker_standards
-
-        return sagemaker_standards
-    except ImportError:
-        return None
 
 
 def attach_router(app: FastAPI):
     if not envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         """If LoRA dynamic loading & unloading is not enabled, do nothing."""
         return
+    if not _SAGEMAKER_AVAILABLE:
+        return
     logger.warning(
         "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!"
     )
 
-    sagemaker_standards = _get_sagemaker_standards()
-
-    # Define the endpoint function
+    @sagemaker_standards.register_load_adapter_handler(
+        request_shape={
+            "lora_name": "body.name",
+            "lora_path": "body.src",
+        },
+    )
+    @router.post("/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)])
     async def load_lora_adapter(request: LoadLoRAAdapterRequest, raw_request: Request):
         handler: OpenAIServingModels = models(raw_request)
         response = await handler.load_lora_adapter(request)
@@ -55,21 +53,14 @@ def attach_router(app: FastAPI):
 
         return Response(status_code=200, content=response)
 
-    # Apply sagemaker decorator if available
-    if sagemaker_standards is not None:
-        load_lora_adapter = sagemaker_standards.register_load_adapter_handler(
-            request_shape={
-                "lora_name": "body.name",
-                "lora_path": "body.src",
-            },
-        )(load_lora_adapter)
-
-    # Register the route
-    router.post(
-        "/v1/load_lora_adapter", dependencies=[Depends(validate_json_request)]
-    )(load_lora_adapter)
-
-    # Define the endpoint function
+    @sagemaker_standards.register_unload_adapter_handler(
+        request_shape={
+            "lora_name": "path_params.adapter_name",
+        }
+    )
+    @router.post(
+        "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
+    )
     async def unload_lora_adapter(
         request: UnloadLoRAAdapterRequest, raw_request: Request
     ):
@@ -81,19 +72,6 @@ def attach_router(app: FastAPI):
             )
 
         return Response(status_code=200, content=response)
-
-    # Apply sagemaker decorator if available
-    if sagemaker_standards is not None:
-        unload_lora_adapter = sagemaker_standards.register_unload_adapter_handler(
-            request_shape={
-                "lora_name": "path_params.adapter_name",
-            }
-        )(unload_lora_adapter)
-
-    # Register the route
-    router.post(
-        "/v1/unload_lora_adapter", dependencies=[Depends(validate_json_request)]
-    )(unload_lora_adapter)
 
     # register the router
     app.include_router(router)
