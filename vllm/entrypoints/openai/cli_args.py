@@ -191,9 +191,12 @@ class FrontendArgs:
     """If set to True, log the stack trace of error responses"""
     tokens_only: bool = False
     """
-    If set to True, only enable the Tokens In<>Out endpoint. 
+    If set to True, only enable the Tokens In<>Out endpoint.
     This is intended for use in a Disaggregated Everything setup.
     """
+    disable_sagemaker_standards: bool = False
+    """If set to True, disable SageMaker integration (routes, middleware, and
+    model_hosting_container_standards dependency)."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
