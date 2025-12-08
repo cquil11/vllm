@@ -15,12 +15,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_models import OpenAIServingModels
 from vllm.logger import init_logger
 
-try:
-    import model_hosting_container_standards.sagemaker as sagemaker_standards
-    _SAGEMAKER_AVAILABLE = True
-except ImportError:
-    _SAGEMAKER_AVAILABLE = False
-
 logger = init_logger(__name__)
 router = APIRouter()
 
@@ -29,8 +23,11 @@ def attach_router(app: FastAPI):
     if not envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
         """If LoRA dynamic loading & unloading is not enabled, do nothing."""
         return
-    if not _SAGEMAKER_AVAILABLE:
+    if app.state.args.disable_sagemaker_standards:
         return
+
+    import model_hosting_container_standards.sagemaker as sagemaker_standards
+
     logger.warning(
         "LoRA dynamic loading & unloading is enabled in the API server. "
         "This should ONLY be used for local development!"
