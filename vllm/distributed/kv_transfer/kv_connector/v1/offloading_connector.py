@@ -141,6 +141,16 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             request, num_computed_tokens
         )
 
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> list[tuple[str, int]]:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_external_cache_hit_sources(
+            request, num_external_tokens
+        )
+
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
