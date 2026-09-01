@@ -43,6 +43,7 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
+    KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheLayout,
 )
@@ -264,11 +265,10 @@ def _make_vllm_config(
 
 def _make_kv_cache_config(
     *, block_size: int = 16, prefix_cache_retention_interval: int | None = 0
-) -> object:
+) -> KVCacheConfig:
     """Minimal single-group KVCacheConfig for topology tests."""
     from vllm.v1.kv_cache_interface import (
         FullAttentionSpec,
-        KVCacheConfig,
         KVCacheGroupSpec,
     )
 
@@ -1946,7 +1946,7 @@ def test_requester_worker_init_uses_positional_setup(tmp_path, monkeypatch):
         "mlx5_0",
         "10.0.0.7:50051",
     )
-    assert w.coord.retention_interval == 0
+    assert w.coord.retention_interval is None
 
 
 def test_requester_worker_init_prefers_local_hostname_override(
@@ -2002,6 +2002,33 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     w = worker.MooncakeStoreWorker(_make_vllm_config(), _make_kv_cache_config())
 
     assert w.disk_offload_buffer_budget_bytes is None
+
+
+@pytest.mark.parametrize("retention_interval", [0, 4096, None])
+def test_store_retention_is_independent_of_hbm(
+    tmp_path, monkeypatch, retention_interval
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+    config = _make_kv_cache_config(prefix_cache_retention_interval=retention_interval)
+    w = worker.MooncakeStoreWorker(_make_vllm_config(), config)
+
+    assert w.coord.retention_interval is None
+    assert config.prefix_cache_retention_interval == retention_interval
 
 
 def test_save_decode_cache_keeps_transfer_path_enabled(tmp_path, monkeypatch):

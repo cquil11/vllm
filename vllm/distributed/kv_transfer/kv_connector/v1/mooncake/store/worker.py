@@ -1603,7 +1603,7 @@ class MooncakeStoreWorker:
             scheduler_block_size=self.block_size,
             hash_block_size=self.hash_block_size,
             use_eagle=use_eagle,
-            retention_interval=kv_cache_config.prefix_cache_retention_interval,
+            retention_interval=None,
             dcp_world_size=self.dcp_size,
         )
         # One ChunkedTokenDatabase per group; addresses populated in
