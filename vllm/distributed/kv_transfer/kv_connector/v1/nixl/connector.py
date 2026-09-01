@@ -77,7 +77,7 @@ logger = init_logger(__name__)
 class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
     """Base connector with common logic shared by pull and push modes."""
 
-    cache_hit_source = CacheHitSource.P2P
+    _cache_hit_source = CacheHitSource.P2P
 
     @property
     def supports_divergent_local_hybrid_hits(self) -> bool:
@@ -372,6 +372,10 @@ class NixlPushConnector(NixlBaseConnector):
         kv_cache_config: "KVCacheConfig",
     ):
         super().__init__(vllm_config, role, kv_cache_config)
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            raise ValueError(
+                "NixlPushConnector does not support decode_context_parallel_size > 1."
+            )
         self.connector_scheduler: NixlPushConnectorScheduler | None = None
         self.connector_worker: NixlPushConnectorWorker | None = None
         if role == KVConnectorRole.SCHEDULER:
