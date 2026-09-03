@@ -371,7 +371,10 @@ class MooncakeStoreScheduler:
         ) in self._unfinished_requests.items():
             if request_id not in request_ids and request_id not in cached_reqs.req_ids:
                 load_spec = self.load_specs.pop(request_id, None)
-                if not load_spec:
+                # A lookup can be rejected in favor of another connector.
+                # Only the chosen connector may issue this pending load;
+                # normal saves use SchedulerOutput once actually scheduled.
+                if load_spec is None or not load_spec.can_load:
                     continue
                 num_tokens_to_compute = load_spec.kvpool_cached_tokens
                 request_tracker = RequestTracker(
