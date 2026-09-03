@@ -740,3 +740,61 @@ def test_async_loads_both_admitted_when_pool_fits():
 
     for req in reqs:
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+@pytest.mark.parametrize("policy", ["priority", "fcfs"])
+def test_parked_async_load_not_stranded_by_unschedulable_head(policy):
+    """A finished remote load must run before a head needing its held blocks.
+
+    Regression from upstream PR #45406: queue-order admission otherwise stops
+    before consuming the parked request's completion, with nothing running to
+    free memory. Once the parked request completes, normal admission resumes.
+    """
+    config = create_vllm_config()
+    config.scheduler_config.policy = policy
+    block_size = config.cache_config.block_size
+    scheduler = create_scheduler(config, num_blocks=12)
+    parked = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=block_size * 4,
+        do_remote_prefill=True,
+        max_tokens=1,
+    )
+    parked.priority = 1
+    scheduler.add_request(parked)
+    output = scheduler.schedule()
+    assert parked.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert not scheduler.running
+    scheduler.update_from_output(output, EMPTY_MODEL_RUNNER_OUTPUT)
+
+    head = create_request(
+        request_id=2,
+        block_size=block_size,
+        num_tokens=block_size * 8,
+        max_tokens=1,
+    )
+    scheduler.add_request(head)
+    if policy == "fcfs":
+        # Connector lookup deferral can put an already-admitted request ahead
+        # of the parked load in skipped_waiting, bypassing the admission gate.
+        scheduler.waiting.remove_request(head)
+        scheduler.skipped_waiting.prepend_request(head)
+    output = scheduler.schedule()
+    assert output.total_num_scheduled_tokens == 0
+
+    received = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    received.kv_connector_output = KVConnectorOutput(
+        finished_recving={parked.request_id}
+    )
+    scheduler.update_from_output(output, received)
+    output = scheduler.schedule()
+    assert parked.status == RequestStatus.RUNNING
+    assert output.num_scheduled_tokens[parked.request_id] == 1
+
+    scheduler.update_from_output(
+        output, create_model_runner_output([parked], use_eos=True)
+    )
+    output = scheduler.schedule()
+    assert head.status == RequestStatus.RUNNING
+    assert output.num_scheduled_tokens[head.request_id] > 0

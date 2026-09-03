@@ -1110,7 +1110,16 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    if self.running:
+                        # Running requests will free blocks; retain queue order.
+                        break
+                    # A parked async load behind this request can hold the
+                    # blocks it needs. With nothing running, stopping here
+                    # would strand that load forever. Continue scanning so its
+                    # completion can be consumed and it can release its blocks.
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
