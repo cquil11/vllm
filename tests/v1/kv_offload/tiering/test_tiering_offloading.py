@@ -23,6 +23,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     _parse_tier_filter,
 )
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.base import (
     Locality,
     LookupResult,
@@ -499,8 +500,12 @@ class TestTieringOffloadingManager:
         # Lookup should find all blocks in primary
         assert count_hits(self.manager, blocks) == 3
 
-    def test_promotion_from_secondary(self, manager_setup):
+    @pytest.mark.parametrize(
+        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+    )
+    def test_promotion_from_secondary(self, manager_setup, monkeypatch, source):
         """Test promotion of blocks from secondary to primary tier."""
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         blocks = to_keys(range(3))
 
         # Manually add blocks to secondary tier (simulate previous cascade)
@@ -526,7 +531,7 @@ class TestTieringOffloadingManager:
 
         # The request that caused the promotion retains the secondary origin.
         assert all(
-            self.manager.get_load_source(block, _CTX) == "external" for block in blocks
+            self.manager.get_load_source(block, _CTX) == source for block in blocks
         )
 
         # A later request sees the blocks as ordinary host-memory primary hits.
@@ -542,6 +547,9 @@ class TestTieringOffloadingManager:
         )
 
     @pytest.mark.parametrize(
+        "source", [CacheHitSource.EXTERNAL, CacheHitSource.DISK, CacheHitSource.P2P]
+    )
+    @pytest.mark.parametrize(
         ("successful_indices", "expected_results"),
         [
             (
@@ -556,8 +564,9 @@ class TestTieringOffloadingManager:
         ids=["partial", "legacy-full-failure"],
     )
     def test_failed_promotion_keeps_only_successful_blocks(
-        self, manager_setup, successful_indices, expected_results
+        self, manager_setup, monkeypatch, source, successful_indices, expected_results
     ):
+        monkeypatch.setattr(ExampleSecondaryTierManager, "cache_hit_source", source)
         blocks = to_keys(range(3))
         for block in blocks:
             self.secondary_tier1.blocks[block] = True
