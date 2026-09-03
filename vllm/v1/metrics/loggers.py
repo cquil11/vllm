@@ -701,6 +701,23 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_prompt_tokens_cached, per_engine_labelvalues
         )
 
+        self.counter_prompt_tokens_cached_by_source = self._counter_cls(
+            name="vllm:prompt_tokens_cached_by_source",
+            documentation=(
+                "Number of cached prompt tokens by the cache tier that "
+                "supplied their KV. Sources are device, host, disk, p2p, and "
+                "external."
+            ),
+            labelnames=labelnames + ["source"],
+        )
+        # Register built-in sources at zero before the first request. A
+        # Prometheus scraper that establishes its baseline at server startup
+        # must not lose the first counter increment when a labeled series is
+        # created lazily during warmup.
+        for source in PromptTokenStats.BUILTIN_CACHED_SOURCES:
+            for labelvalues in per_engine_labelvalues.values():
+                self.counter_prompt_tokens_cached_by_source.labels(*labelvalues, source)
+
         counter_generation_tokens = self._counter_cls(
             name="vllm:generation_tokens",
             documentation="Number of generation tokens processed.",
@@ -1209,6 +1226,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 pts.get_by_source(source)
             )
         self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
+        for source, num_tokens in pts.cached_tokens_by_source.items():
+            self.counter_prompt_tokens_cached_by_source.labels(
+                *self.per_engine_labelvalues[engine_idx], source
+            ).inc(num_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
