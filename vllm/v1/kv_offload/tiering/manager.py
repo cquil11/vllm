@@ -56,6 +56,10 @@ from vllm.v1.kv_offload.tiering.base import (
     TransferJob,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
+from vllm.v1.kv_offload.tiering.promotion_policy import (
+    PinUnreadPromotionsPolicy,
+    PromotionPolicy,
+)
 
 logger = init_logger(__name__)
 
@@ -185,6 +189,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
+        promotion_policy: PromotionPolicy | None = None,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -196,6 +201,9 @@ class TieringOffloadingManager(OffloadingManager):
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
+        self._promotion_policy: PromotionPolicy = (
+            promotion_policy or PinUnreadPromotionsPolicy()
+        )
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.
@@ -269,6 +277,16 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = True
         self._process_finished_jobs()
 
+    def _maybe_pin_promotion(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> None:
+        state = self._req_state.get(req_context.req_id)
+        request_finished = state is not None and state.is_finished
+        if self._promotion_policy.on_promotion_landed(
+            keys, req_context, request_finished
+        ):
+            self.primary_tier.prepare_load(keys, req_context)
+
     def _complete_promotion(
         self, job_metadata: JobMetadata, completed_job: JobResult
     ) -> None:
@@ -303,6 +321,7 @@ class TieringOffloadingManager(OffloadingManager):
                 transfer_job.req_context,
                 True,
             )
+            self._maybe_pin_promotion(successful_keys, transfer_job.req_context)
         if failed_keys:
             self.primary_tier.complete_write(
                 failed_keys,
@@ -539,6 +558,9 @@ class TieringOffloadingManager(OffloadingManager):
         Returns:
             LoadStoreSpec for reading from primary tier.
         """
+        held_keys = self._promotion_policy.on_consumed(keys)
+        if held_keys:
+            self.primary_tier.complete_load(held_keys, req_context)
         return self.primary_tier.prepare_load(keys, req_context)
 
     @override
@@ -801,6 +823,9 @@ class TieringOffloadingManager(OffloadingManager):
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
+        abandoned_keys = self._promotion_policy.on_request_finished(req_context.req_id)
+        if abandoned_keys:
+            self.primary_tier.complete_load(abandoned_keys, req_context)
         self._maybe_finalize_request(req_context.req_id, exclude_tier_idx)
 
     def _maybe_finalize_request(
@@ -910,6 +935,7 @@ class TieringOffloadingManager(OffloadingManager):
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
         self._request_load_sources.clear()
+        self._promotion_policy.reset()
         self._metrics.assert_idle()
 
         finished_req_ids = []
