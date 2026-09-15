@@ -30,6 +30,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import 
     MooncakeStoreConnectorStats,
 )
 from vllm.v1.kv_cache_interface import (
+    CircularBufferSpec,
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
@@ -89,6 +90,53 @@ def _make_kv_cache_config() -> KVCacheConfig:
         ],
         kv_cache_groups=[KVCacheGroupSpec(["layer0"], spec)],
     )
+
+
+def _make_qsa_hybrid_kv_cache_config(mamba_mode: str):
+    full_spec = FullAttentionSpec(
+        block_size=800, num_kv_heads=8, head_size=64, dtype=None
+    )
+    qsa_spec = CircularBufferSpec(
+        block_size=8,
+        num_kv_heads=1,
+        head_size=64,
+        head_size_v=0,
+        dtype=torch.float16,
+    )
+    mamba_spec = MambaSpec(
+        block_size=800,
+        shapes=((1, 1),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode=mamba_mode,
+    )
+    return KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], full_spec),
+            KVCacheGroupSpec(["qsa"], qsa_spec),
+            KVCacheGroupSpec(["mamba"], mamba_spec),
+        ],
+    )
+
+
+def test_validation_accepts_aligned_mamba_after_block_size_rewrite():
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.block_size = 8
+
+    mooncake_store_connector.MooncakeStoreConnector._validate_kv_cache_config(
+        vllm_config, _make_qsa_hybrid_kv_cache_config("align")
+    )
+
+
+def test_validation_rejects_mamba_mode_directly():
+    vllm_config = _make_vllm_config()
+    vllm_config.cache_config.block_size = 800
+
+    with pytest.raises(ValueError, match="mamba_cache_mode=\x27none\x27"):
+        mooncake_store_connector.MooncakeStoreConnector._validate_kv_cache_config(
+            vllm_config, _make_qsa_hybrid_kv_cache_config("none")
+        )
 
 
 def test_scheduler_requires_align_mode_for_mamba():
@@ -157,6 +205,29 @@ def test_scheduler_role_initializes_store_scheduler_only():
 
     connector.bind_gpu_block_pool(block_pool)
     mock_scheduler.return_value.bind_gpu_block_pool.assert_called_once_with(block_pool)
+
+
+def test_scheduler_reports_mooncake_cache_source():
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ),
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    # Mooncake Store is an external cache service. Its internal memory and
+    # local-storage policy is intentionally hidden behind that stable label.
+    assert connector.get_external_cache_hit_sources(None, 32) == [  # type: ignore[arg-type]
+        ("external", 32)
+    ]
+    assert connector.get_external_cache_hit_sources(None, 0) == []  # type: ignore[arg-type]
 
 
 def test_worker_methods_delegate_to_store_worker():

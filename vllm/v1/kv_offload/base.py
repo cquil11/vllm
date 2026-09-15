@@ -18,6 +18,7 @@ if TYPE_CHECKING:
         OffloadingConnectorStats,
     )
 
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.kv_offload.config import OffloadingConfig
 
 # `OffloadKey` identifies an offloaded block. It combines a block hash with
@@ -114,17 +115,17 @@ class LookupResult(Enum):
 
 
 class OffloadPolicy(Enum):
-    # Offload only newly-computed blocks as they arrive; prefix-hit
-    # blocks (already offloaded by a prior request) are skipped.
-    BLOCK_LEVEL = "block_level"
-    # Offload all blocks for the request, including prefix hits.
+    # Offload only newly-computed chunks as they arrive; prefix-hit
+    # chunks (already offloaded by a prior request) are skipped.
+    CHUNK_LEVEL = "chunk_level"
+    # Offload all chunks for the request, including prefix hits.
     # Used by tiers that need the complete KV context for a request.
     REQUEST_LEVEL = "request_level"
 
 
 @dataclass
 class RequestOffloadingContext:
-    policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
+    policy: OffloadPolicy = OffloadPolicy.CHUNK_LEVEL
 
 
 class ScheduleEndContext(NamedTuple):
@@ -236,6 +237,18 @@ class OffloadingManager(ABC):
             lookup should be retried later.
         """
         pass
+
+    def get_load_source(
+        self, key: OffloadKey, req_context: ReqContext
+    ) -> CacheHitSource:
+        """Return the cache tier that supplied a successful lookup.
+
+        This is queried only after ``lookup`` resolves to ``HIT``. Composing
+        managers can override it to retain the origin across asynchronous
+        promotion into a primary tier. The default keeps out-of-tree managers
+        compatible while making unknown provenance explicit.
+        """
+        return CacheHitSource.EXTERNAL
 
     @abstractmethod
     def prepare_load(
@@ -400,6 +413,9 @@ class OffloadingManager(ABC):
 class BlockIDsLoadStoreSpec(LoadStoreSpec, ABC):
     """
     Spec for loading/storing KV blocks from given block numbers.
+
+    Subclass semantics differ: GPULoadStoreSpec.block_ids are GPU block
+    indices; CPULoadStoreSpec.block_ids are CPU cache chunk indices.
     """
 
     def __init__(self, block_ids: list[int]):

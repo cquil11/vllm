@@ -16,9 +16,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.logger import init_logger
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.simple_kv_offload.manager import (
+    BoundaryStoreStats,
     SimpleCPUOffloadScheduler,
 )
 from vllm.v1.simple_kv_offload.metadata import (
@@ -98,6 +100,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 f"expected one of {VALID_KV_OFFLOAD_BACKENDS}"
             )
         disk_mode = kv_offload_backend == "disk"
+        self._cache_source = CacheHitSource.DISK if disk_mode else CacheHitSource.HOST
 
         disk_path = extra_config.get("disk_path", None) or None
         disk_capacity_bytes = int(
@@ -249,6 +252,15 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             )
         return 0, False
 
+    def get_external_cache_hit_sources(
+        self,
+        request: "Request",
+        num_external_tokens: int,
+    ) -> list[tuple[CacheHitSource, int]]:
+        if num_external_tokens == 0:
+            return []
+        return [(self._cache_source, num_external_tokens)]
+
     def update_state_after_alloc(
         self,
         request: "Request",
@@ -299,6 +311,12 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         if self.scheduler_manager is not None:
             return self.scheduler_manager.has_pending_stores()
         return False
+
+    def get_boundary_store_stats(self) -> BoundaryStoreStats | None:
+        """Return cumulative boundary-handoff store diagnostics."""
+        if self.scheduler_manager is not None:
+            return self.scheduler_manager.get_boundary_store_stats()
+        return None
 
     def take_events(self) -> Iterable[KVCacheEvent]:
         if self.scheduler_manager is not None:

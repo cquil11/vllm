@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
+from vllm.v1.cache_hit_source import CacheHitSource
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
@@ -129,6 +130,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.get_load_source.return_value = CacheHitSource.EXTERNAL
         self.manager.get_stats.return_value = None
         self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingWorker()
@@ -180,6 +182,8 @@ class RequestRunner:
         kv_cache_groups: list[KVCacheGroupSpec] | None = None,
         extra_config_overrides: dict[str, Any] | None = None,
         worker_count: int = 1,
+        retention_interval: int | None = None,
+        speculative_config: Any | None = None,
     ):
         assert blocks_per_chunk == 1 or kv_cache_groups is None, (
             "blocks_per_chunk > 1 requires all groups to have the same "
@@ -200,6 +204,9 @@ class RequestRunner:
         )
         vllm_config.scheduler_config.async_scheduling = async_scheduling
         vllm_config.parallel_config.world_size = worker_count
+        vllm_config.cache_config.prefix_cache_retention_interval = retention_interval
+        if speculative_config is not None:
+            vllm_config.speculative_config = speculative_config
 
         extra_config: dict[str, Any] = {
             "spec_name": "MockOffloadingSpec",
@@ -676,6 +683,8 @@ def request_runner():
         kv_cache_groups=None,
         extra_config_overrides=None,
         worker_count=1,
+        retention_interval=None,
+        speculative_config=None,
     ):
         runner = RequestRunner(
             block_size=block_size,
@@ -685,6 +694,8 @@ def request_runner():
             kv_cache_groups=kv_cache_groups,
             extra_config_overrides=extra_config_overrides,
             worker_count=worker_count,
+            retention_interval=retention_interval,
+            speculative_config=speculative_config,
         )
         runners.append(runner)
         return runner

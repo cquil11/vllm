@@ -5,8 +5,6 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::OpaqueValue;
-
 /// Stores cache hit statistics.
 ///
 /// Original Python definition:
@@ -78,6 +76,37 @@ pub struct SpecDecodingStats {
     pub num_accepted_tokens_per_pos: Vec<u64>,
 }
 
+/// Canonical source of cached prompt tokens, matching Python's `CacheHitSource`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHitSource {
+    Device,
+    Host,
+    Disk,
+    P2p,
+    External,
+}
+
+impl CacheHitSource {
+    pub const ALL: [Self; 5] = [
+        Self::Device,
+        Self::Host,
+        Self::Disk,
+        Self::P2p,
+        Self::External,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Device => "device",
+            Self::Host => "host",
+            Self::Disk => "disk",
+            Self::P2p => "p2p",
+            Self::External => "external",
+        }
+    }
+}
+
 /// Breakdown of a scheduled prefill computation.
 ///
 /// Python models this as a plain `@dataclass`, so it is serialized by msgspec
@@ -103,6 +132,9 @@ pub struct PrefillStats {
     /// Tokens to be prefilled from external KV transfer.
     #[serde(default)]
     pub num_external_cached_tokens: u32,
+    /// Ordered external token counts by the tier that supplied their KV.
+    #[serde(default)]
+    pub external_cached_token_sources: Vec<(CacheHitSource, u32)>,
     /// Prompt tokens newly admitted into the local prefix cache.
     #[serde(default)]
     pub num_cache_creation_tokens: u32,
@@ -158,6 +190,120 @@ pub struct CudagraphStats {
     pub runtime_mode: String,
 }
 
+/// KV connector telemetry DTOs carried by [`SchedulerStats`].
+pub mod kv_connector {
+    use std::collections::BTreeMap;
+
+    use serde::{Deserialize, Serialize};
+
+    use crate::protocol::OpaqueValue;
+
+    /// NIXL connector transfer telemetry.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct NixlStats {
+        /// Time spent transferring each successful request.
+        pub transfer_duration: Vec<f64>,
+        /// Time spent posting each successful transfer.
+        pub post_duration: Vec<f64>,
+        /// Bytes transferred by each successful request.
+        pub bytes_transferred: Vec<u64>,
+        /// Descriptor count for each successful request.
+        pub num_descriptors: Vec<u64>,
+        /// Failure counter increments collected since the previous update.
+        pub num_failed_transfers: Vec<u64>,
+        /// Notification failure counter increments collected since the previous update.
+        pub num_failed_notifications: Vec<u64>,
+        /// Expired-request counter increments collected since the previous update.
+        pub num_kv_expired_reqs: Vec<u64>,
+    }
+
+    /// Mooncake store operation name.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MooncakeOperation {
+        SaveExists,
+        SavePut,
+        LoadGet,
+        LookupExists,
+    }
+
+    impl MooncakeOperation {
+        pub(crate) const fn as_str(self) -> &'static str {
+            match self {
+                Self::SaveExists => "save_exists",
+                Self::SavePut => "save_put",
+                Self::LoadGet => "load_get",
+                Self::LookupExists => "lookup_exists",
+            }
+        }
+    }
+
+    /// Mooncake store operation status.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    pub enum MooncakeStatus {
+        Ok,
+        Error,
+        PartialFailure,
+    }
+
+    impl MooncakeStatus {
+        pub(crate) const fn as_str(self) -> &'static str {
+            match self {
+                Self::Ok => "ok",
+                Self::Error => "error",
+                Self::PartialFailure => "partial_failure",
+            }
+        }
+    }
+
+    /// One Mooncake store operation sample.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct MooncakeRecord {
+        pub duration_seconds: f64,
+        pub num_keys: u64,
+        pub num_bytes: u64,
+        pub status: MooncakeStatus,
+        pub num_failed_keys: u64,
+    }
+
+    /// Mooncake store telemetry grouped by operation.
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    #[serde(transparent)]
+    pub struct MooncakeStats(pub BTreeMap<MooncakeOperation, Vec<MooncakeRecord>>);
+
+    /// Telemetry emitted by a `MultiConnector` with a flat child payload map.
+    #[serde_with::skip_serializing_none]
+    #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+    pub struct MultiConnectorStats {
+        #[serde(rename = "NixlConnector")]
+        pub nixl: Option<NixlStats>,
+        #[serde(rename = "NixlPullConnector")]
+        pub nixl_pull: Option<NixlStats>,
+        #[serde(rename = "NixlPushConnector")]
+        pub nixl_push: Option<NixlStats>,
+        #[serde(rename = "MooncakeStoreConnector")]
+        pub mooncake: Option<MooncakeStats>,
+        /// Child connector payloads without a Rust telemetry implementation.
+        #[serde(flatten)]
+        pub other: BTreeMap<String, OpaqueValue>,
+    }
+
+    /// Connector-specific scheduler telemetry.
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    #[serde(untagged)]
+    pub enum KvConnectorStats {
+        Nixl(NixlStats),
+        Mooncake(MooncakeStats),
+        Multi(Box<MultiConnectorStats>),
+        Other(BTreeMap<String, OpaqueValue>),
+    }
+}
+
+pub use kv_connector::*;
+
 /// Stats associated with the scheduler.
 ///
 /// Original Python definition:
@@ -185,10 +331,84 @@ pub struct SchedulerStats {
     pub kv_cache_eviction_events: Vec<KvCacheEvictionEvent>,
     /// Speculative decoding scheduler stats, when enabled.
     pub spec_decoding_stats: Option<SpecDecodingStats>,
-    /// Connector-specific KV transfer stats, kept opaque for now.
-    pub kv_connector_stats: Option<BTreeMap<String, OpaqueValue>>,
+    /// Connector-specific KV transfer stats.
+    pub kv_connector_stats: Option<KvConnectorStats>,
     /// CUDA graph runtime stats when graph metrics are enabled.
     pub cudagraph_stats: Option<CudagraphStats>,
     /// Estimated MFU/performance stats, when enabled.
     pub perf_stats: Option<PerfStats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CacheHitSource, PrefillStats};
+
+    #[test]
+    fn prefill_sources_decode_python_named_fields_and_legacy_payloads() {
+        let payload = serde_json::json!({
+            "num_prompt_tokens": 64,
+            "num_computed_tokens": 8,
+            "num_cached_tokens": 56,
+            "num_local_cached_tokens": 16,
+            "num_external_cached_tokens": 40,
+            "external_cached_token_sources": [["host", 8], ["disk", 12], ["p2p", 16], ["external", 4]]
+        });
+        let wire = rmp_serde::to_vec_named(&payload).unwrap();
+        let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
+        expect_test::expect![[r#"
+            PrefillStats {
+                num_prompt_tokens: 64,
+                num_computed_tokens: 8,
+                num_cached_tokens: 56,
+                num_local_cached_tokens: 16,
+                num_external_cached_tokens: 40,
+                external_cached_token_sources: [
+                    (
+                        Host,
+                        8,
+                    ),
+                    (
+                        Disk,
+                        12,
+                    ),
+                    (
+                        P2p,
+                        16,
+                    ),
+                    (
+                        External,
+                        4,
+                    ),
+                ],
+                num_cache_creation_tokens: 0,
+            }
+        "#]]
+        .assert_debug_eq(&stats);
+
+        let legacy = serde_json::json!({"num_external_cached_tokens": 40});
+        let wire = rmp_serde::to_vec_named(&legacy).unwrap();
+        let stats: PrefillStats = rmp_serde::from_slice(&wire).unwrap();
+        assert!(stats.external_cached_token_sources.is_empty());
+        assert_eq!(stats.num_external_cached_tokens, 40);
+
+        for (index, source) in CacheHitSource::ALL.into_iter().enumerate() {
+            assert_eq!(source as usize, index);
+            assert_eq!(serde_json::to_value(source).unwrap(), source.as_str());
+        }
+    }
+
+    #[test]
+    fn prefill_sources_reject_noncanonical_labels_and_invalid_counts() {
+        for segment in [
+            serde_json::json!(["cpu", 1]),
+            serde_json::json!(["nvme", 0]),
+            serde_json::json!(["unknown", 1]),
+            serde_json::json!(["host", -1]),
+            serde_json::json!(["disk", 1.5]),
+        ] {
+            let payload = serde_json::json!({"external_cached_token_sources": [segment]});
+            let wire = rmp_serde::to_vec_named(&payload).unwrap();
+            assert!(rmp_serde::from_slice::<PrefillStats>(&wire).is_err());
+        }
+    }
 }
