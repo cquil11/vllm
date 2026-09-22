@@ -371,7 +371,11 @@ class MoRIIOConfig:
             proxy_ip=extra_config.get("proxy_ip", ""),
             local_ping_port=get_open_port(),
             proxy_ping_port=int(extra_config.get("proxy_ping_port", 0)),
-            http_port=int(extra_config["http_port"]),
+            http_port=int(
+                extra_config["http_port"]
+                if extra_config.get("proxy_ip")
+                else extra_config.get("http_port", 0)
+            ),
             handshake_port=int(extra_config["handshake_port"]),
             notify_port=base_notify_port + port_offset,
             tp_rank=tp_rank,
