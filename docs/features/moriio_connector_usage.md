@@ -22,6 +22,34 @@ For instructions on installing appropriate NIC userspace libraries, see [Install
 
 Start the proxy first; the producer and consumer instances will retry registration until the proxy is reachable.
 
+### Static worker URLs (PoC)
+
+With the companion vLLM router PoC, the router can read each worker's control
+addresses and transfer mode over HTTP instead of requiring workers to register
+with a separate ZMQ listener. Remove `proxy_ip`, `proxy_ping_port`, and `http_port`
+from the producer and consumer configurations below, then start the workers
+before the router:
+
+```bash
+vllm-router --vllm-pd-disaggregation --kv-connector moriio \
+  --prefill http://127.0.0.1:20005 \
+  --decode http://127.0.0.1:40005
+```
+
+`GET /v1/moriio/metadata` returns the worker's role, HTTP address, MoRI handshake
+and notification addresses, TP/DP sizes, and `READ` or `WRITE` transfer mode.
+It uses the same API-key authentication as other `/v1` endpoints. Set the router's
+`--api-key` when workers require a key. Both workers must use the same transfer
+mode; `read_mode: true` selects READ and the default is WRITE.
+
+This PoC supports DP=1, PP=1, and single-node `uni`/`mp` execution per worker;
+prefill and decode may run on different hosts, and local tensor parallelism is
+supported. Set `host_ip` to a worker address reachable by its peers on hosts with
+multiple network interfaces. Handshake and notification ports still need to be
+unique across workers on the same host. The endpoint rejects unsupported
+topologies rather than advertising an incorrect address. Existing ZMQ service
+discovery remains available for other deployments.
+
 ### Producer (prefiller) configuration
 
 Start a prefiller instance that produces KV caches
